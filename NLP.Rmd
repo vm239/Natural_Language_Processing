@@ -1,0 +1,244 @@
+---
+title: "NLP"
+author: "Vidya Madhavan"
+---
+
+## Libraries
+```{r}
+#Make sure you install and load the following libraries
+
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(ggplot2)
+library(tidyverse) #You will need the full tidyverse package not tidyr and dyplr separately
+library(topicmodels)
+
+#IF USING A MAC PLEASE RUN THIS CODE
+Sys.setlocale("LC_ALL", "C")
+```
+
+## In the class-notes folder you will find real csv files exported from real student's note taking in this class. Import all document files and the list of weeks file
+```{r}
+library(tidyverse)
+
+#Create a list of all the files, then loop over file list importing them and binding them together
+D1 <- list.files(path = "class-notes/",
+               pattern = "*.csv", 
+               full.names = T) %>% 
+    map_df(~read_csv(., col_types = cols(.default = "c"))) 
+  
+```
+```{r}
+head(D1)
+```
+
+
+## Step 1 - Clean
+```{r}
+#Separate out the variables of interest
+D1 <- select(D1, Title, Notes)
+
+#Remove the htlm tags from your text
+D1$Notes <- gsub("<.*?>", "", D1$Notes)
+D1$Notes <- gsub("nbsp", "" , D1$Notes)
+D1$Notes <- gsub("nbspnbspnbsp", "" , D1$Notes)
+D1$Notes <- gsub("<U+00A0><U+00A0><U+00A0>", "" , D1$Notes)
+```
+
+```{r}
+#Merge the weeks data with your notes data so that each line has a week attributed to it and  remove readings not belonging to the class (IE - that are NA for week)
+
+weeks <- read.csv("week-list.csv")
+```
+```{r}
+D1 <- D1 %>% left_join(weeks, by = "Title")
+D1 <- D1 %>% filter(!(is.na(week)), !(is.na(Notes)))
+```
+
+## Step 2 - Process text using the tm package
+```{r}
+#Convert the data frame to the corpus format that the tm package uses
+corpus <- VCorpus(VectorSource(D1$Notes))
+#Remove spaces
+corpus <- tm_map(corpus, stripWhitespace)
+#Convert to lower case
+corpus <- tm_map(corpus, tolower)
+#Remove pre-defined stop words ('the', 'a', etc)
+corpus <- tm_map(corpus, removeWords, stopwords('english'))
+#Convert words to stems ("education" = "edu") for analysis, for more info see  http://tartarus.org/~martin/PorterStemmer/
+corpus <- tm_map(corpus, stemDocument)
+#Remove numbers
+corpus <- tm_map(corpus, removeNumbers)
+#remove punctuation
+corpus <- tm_map(corpus, removePunctuation)
+#Convert to plain text for mapping by wordcloud package
+corpus <- tm_map(corpus, PlainTextDocument, lazy = TRUE)
+
+#Convert corpus to a term document matrix - so each word can be analyzed individually
+tdm.corpus <- TermDocumentMatrix(corpus)
+
+#Note: we won't remove plural words here, plural words in English tend to be highly irregular and difficult to extract reliably
+```
+
+What processing steps have you conducted here? Why is this important? Are there any other steps you should take to process your text before analyzing?
+The processes we have conducted here help us remove unnecessary grammatical attributes of words and make them more uniform for the machine to understand. This include removing certain punctuation (not all, just ones that add lesser meaning to a sentence),  stemming words together (this is a process by which words belonging to the same family are grouped together, after removing their derivational affixes).
+
+## Step 3 - Find common words
+```{r}
+#The tm package can do some simple analysis, like find the most common words
+findFreqTerms(tdm.corpus, lowfreq=500, highfreq=Inf)
+#We can also create a vector of the word frequencies that can be useful to see common and uncommon words
+word.count <- sort(rowSums(as.matrix(tdm.corpus)), decreasing=TRUE)
+word.count <- data.frame(word.count)
+#Look at the word.count dataframe
+```
+```{r}
+head(D1)
+```
+
+## Generate a Word Cloud
+
+### ColorBrewer
+ColorBrewer is a useful tool to help you choose colors for visualizations that was originally built for cartographers. On the ColorBrewer website (http://colorbrewer2.org/#) you can test different color schemes or see what their preset color schemes look like. This is very useful, especially if you are making images for colorblind individuals. 
+```{r}
+#Define the colors the cloud will use
+col=brewer.pal(6,"Dark2")
+#Generate cloud, make sure your window is large enough to see it
+wordcloud(corpus, min.freq=500, scale=c(5,2),rot.per = 0.25,
+          random.color=T, max.word=45, random.order=F,colors=col)
+```
+
+# Sentiment Analysis
+
+### Match words in corpus to lexicons of positive & negative words
+```{r}
+#Upload positive and negative word lexicons
+positive <- readLines("positive-words.txt")
+negative <- readLines("negative-words.txt")
+
+#Search for matches between each word and the two lexicons
+D1$positive <- tm_term_score(tdm.corpus, positive)
+D1$negative <- tm_term_score(tdm.corpus, negative)
+
+#Generate an overall pos-neg score for each line
+D1$score <- D1$positive - D1$negative
+
+```
+#Checking the data again
+```{r}
+D1 %>% head
+```
+## Using ggplot Generate a visualization of the mean sentiment score over weeks, remove rows that have readings from other classes (NA for weeks). You will need to summarize your data to achieve this.
+```{r}
+D1 %>% filter(!(is.na(Notes))) %>% group_by(week) %>% summarize(avg_sentiment = mean(score)) %>% ggplot + geom_line(mapping = aes(x = week, y = avg_sentiment))
+```
+
+# LDA Topic Modelling
+
+Using the same csv file you have generated the LDA analysis will treat each row of the data frame as a document. Does this make sense for generating topics?
+This makes sense for generating topics as the rows have notes along the same topic.
+
+```{r}
+#Term Frequency Inverse Document Frequency
+dtm.tfi <- DocumentTermMatrix(corpus, control = list(weighting = weightTf))
+
+#Remove very uncommon terms (term freq inverse document freq < 0.1)
+dtm.tfi <- dtm.tfi[,dtm.tfi$v >= 0.1]
+
+#Remove non-zero entries
+rowTotals <- apply(dtm.tfi , 1, sum) #Find the sum of words in each Document
+dtm.tfi2   <- dtm.tfi[rowTotals> 0, ] #Divide by sum across rows
+```
+
+```{r}
+#Identify rows with zero entries
+#Remove these rows from original dataset
+zerorows<- which(rowTotals %in% c(0))
+```
+
+```{r}
+D1 <- D1[-c(zerorows),]
+```
+
+
+```{r}
+lda.model = LDA(dtm.tfi2, k = 5, seed = 150)
+```
+
+```{r}
+terms(lda.model, k = 10) 
+```
+
+```{r}
+D1$topic <- topics(lda.model)
+```
+
+What does an LDA topic represent? 
+An LDA topic represents a set of words or terms spread across one or many documents. The algorithm helps represent the distribution of the given number of topics across the collection of documents.
+
+# Final Task 
+
+Find a set of documents, perhaps essays you have written or articles you have available and complete an LDA analysis of those documents. Does the method group documents as you would expect?
+```{r}
+vidyadata <- read_csv("/Users/vidyamadhavan/Desktop/HUDK\ 4050/HUDK\ 4051\ SQL\ +\ Pred/Vidya\ Pred/natural-language-processing/vidya_reflection/Reflection_Data\ Contexts_\ Economics.txt", col_names = FALSE)
+```
+```{r}
+view(vidyadata)
+```
+
+```{r}
+D7 <- lapply(vidyadata, read_lines)
+D7<- gsub("<.*?>", "", D7)
+D7<- gsub("nbsp", "" , D7)
+D7 <- gsub("nbspnbspnbsp", "" , D7)
+D7 <- gsub("<U+00A0><U+00A0><U+00A0>", "" , D7)
+D7 <- gsub("“", "" , D7)
+D7 <- gsub("—", "" , D7)
+D7 <- gsub("’s", "" , D7)
+D8 <- Corpus(VectorSource(D7))
+```
+
+```{r}
+D8<- tm_map(D8, stripWhitespace)
+D8<- tm_map(D8, tolower)
+D8 <- tm_map(D8, removeWords, stopwords('english'))
+D8 <- tm_map(D8, stemDocument)
+
+ #Remove numbers
+D8<- tm_map(D8, removeNumbers)
+
+ #remove punctuation
+D8 <- tm_map(D8, removePunctuation)
+D9 <- DocumentTermMatrix(D8, control = list(weighting = weightTf))
+D9 <- D9[,D9$v >= 0.1]
+
+ #Remove non-zero entries
+D9_rowTotals <- apply(D9 , 1, sum) 
+D10 <- D9[D9_rowTotals> 0, ] 
+
+ #Identify rows with zero entries
+D9_zero_rows<-which(D9_rowTotals %in% c(0))
+D9.model = LDA(D10, k = 10, seed = 100)
+terms(D9.model, k = 10) 
+D11 <- lapply(vidyadata, read_lines, n_max = 1)
+```
+```{r}
+corpus1 <- VCorpus(VectorSource(vidyadata))
+corpus1 <- tm_map(corpus1, PlainTextDocument, lazy = TRUE)
+```
+
+```{r}
+tdm.corpus1 <- TermDocumentMatrix(corpus1)
+```
+
+```{r}
+dtm.tfi3 <- DocumentTermMatrix(corpus1, control = list(weighting = weightTf))
+dtm.tfi3 <- dtm.tfi3[,dtm.tfi3$v >= 0.1]
+lda.model = LDA(dtm.tfi3, k = 3, seed = 150)
+```
+```{r}
+terms(lda.model, k = 10) 
+```
+
+#End
